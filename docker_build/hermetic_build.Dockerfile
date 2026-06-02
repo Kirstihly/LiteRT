@@ -20,18 +20,30 @@ FROM ubuntu:24.04
 # access goes direct. Both lower-case and upper-case variants are forwarded
 # because different tools honour different conventions (e.g. curl reads
 # http_proxy while some Java libraries read HTTP_PROXY).
+# Empty proxy variables are NOT exported: Java sdkmanager fails with
+# MalformedURLException when HTTP_PROXY/HTTPS_PROXY are set but blank.
 ARG http_proxy
 ARG https_proxy
 ARG no_proxy
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
-ENV http_proxy=${http_proxy} \
-    https_proxy=${https_proxy} \
-    no_proxy=${no_proxy} \
-    HTTP_PROXY=${HTTP_PROXY} \
-    HTTPS_PROXY=${HTTPS_PROXY} \
-    NO_PROXY=${NO_PROXY}
+RUN mkdir -p /etc/profile.d && : > /etc/profile.d/proxy.sh && \
+    for var in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; do \
+      eval "val=\$$var"; \
+      if [ -n "$val" ]; then echo "export $var=\"$val\"" >> /etc/profile.d/proxy.sh; fi; \
+    done && \
+    cat >> /etc/bash.bashrc << 'EOF'
+
+# Proxy: export non-empty build-arg values, then drop blank vars that BuildKit
+# may inject (Java sdkmanager fails on empty HTTP_PROXY/HTTPS_PROXY).
+[ -f /etc/profile.d/proxy.sh ] && . /etc/profile.d/proxy.sh
+for _pv in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; do
+  eval "_pval=\${$_pv:-}"
+  [ -z "$_pval" ] && unset "$_pv"
+done
+EOF
+SHELL ["/bin/bash", "-lc"]
 
 # Avoid interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -132,7 +144,12 @@ ENV USE_BAZEL_VERSION=7.4.1
 ENV CLANG_COMPILER_PATH=/usr/lib/llvm-18/bin/clang
 ENV TF_NEED_CLANG=1
 
-RUN echo y | ${ANDROID_SDK_HOME}/cmdline-tools/latest/bin/sdkmanager --sdk_root=${ANDROID_SDK_HOME} "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" "platforms;android-${ANDROID_SDK_API_LEVEL}" "platform-tools"
+# BuildKit can inject blank HTTP_PROXY/HTTPS_PROXY from the client env; sdkmanager
+# rejects those. Unset empty proxy vars immediately before invoking Java tools.
+RUN for _pv in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; do \
+      eval "_pval=\${$_pv:-}"; [ -z "$_pval" ] && unset "$_pv"; \
+    done && \
+    echo y | ${ANDROID_SDK_HOME}/cmdline-tools/latest/bin/sdkmanager --sdk_root=${ANDROID_SDK_HOME} "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" "platforms;android-${ANDROID_SDK_API_LEVEL}" "platform-tools"
 # Set up work directory
 WORKDIR /litert_build
 

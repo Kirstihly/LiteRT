@@ -46,10 +46,15 @@ done
 
 if [ "$SKIP_BUILD" -eq 0 ]; then
   echo "Building Docker image..."
+  # BuildKit inherits client proxy env; empty HTTP_PROXY breaks Java sdkmanager.
+  for _var in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; do
+    eval "_val=\${$_var:-}"
+    [ -z "$_val" ] && unset "$_var"
+  done
   # Forward host proxy env vars into the Docker image build so that apt-get,
   # wget, and pip can reach the internet from behind a corporate proxy.
-  # When these variables are unset the --build-arg values are empty strings
-  # and Docker ignores them — no proxy is configured.
+  # Empty/unset values are passed as blank build-args; the Dockerfile skips
+  # exporting them so Java sdkmanager is not broken by empty proxy URLs.
   docker build -t litert_build_env -f ./hermetic_build.Dockerfile \
     --build-arg http_proxy="${http_proxy}" \
     --build-arg https_proxy="${https_proxy}" \
