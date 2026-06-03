@@ -153,32 +153,14 @@ RUN for _pv in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; 
 # Set up work directory
 WORKDIR /litert_build
 
-# Create a script to generate .litert_configure.bazelrc automatically and initialize git submodules
-RUN echo '#!/bin/bash\n\
-\n\
-# Make the repository directory safe for git\n\
-git config --global --add safe.directory /litert_build\n\
-git config --global --add safe.directory /litert_build/third_party/tensorflow\n\
-\n\
-/litert_build/configure --workspace=/litert_build\n\
-\n\
-echo "Configuration complete. .litert_configure.bazelrc has been generated at /litert_build/.litert_configure.bazelrc"\n\
-\n\
-# Execute the command passed to the entrypoint\n\
-exec "$@"\n\
-' > /entrypoint.sh && chmod +x /entrypoint.sh
+# Entrypoint generates .litert_configure.bazelrc before running the build CMD.
+COPY entrypoint.sh /entrypoint.sh
+COPY setup_bazel_env.sh /setup_bazel_env.sh
+COPY run_build.sh /run_build.sh
+RUN chmod +x /entrypoint.sh /setup_bazel_env.sh /run_build.sh
 
 # Set the entrypoint
 ENTRYPOINT ["/entrypoint.sh"]
-
-# Default build script.
-# Provides proxy-to-JVM forwarding, optional SVE workaround, and a single
-# default Bazel target.  Individual build_*.sh scripts (build_with_docker.sh,
-# build_wheel_with_docker.sh) override the CMD to run their own targets while
-# reusing the same proxy/SVE helpers defined inline.
-COPY setup_bazel_env.sh /setup_bazel_env.sh
-COPY run_build.sh /run_build.sh
-RUN chmod +x /setup_bazel_env.sh /run_build.sh
 
 # Default command — builds //litert/runtime:compiled_model.
 # Override with `docker run ... litert_build_env bash -c '...'` or by passing

@@ -24,7 +24,7 @@
 set -euo pipefail
 
 source /setup_bazel_env.sh
-bazel ${EXTRA_STARTUP} build //litert/vendors/qualcomm/compiler:qualcomm_compiler_plugin_so
-bazel ${EXTRA_STARTUP} build //litert/vendors/mediatek/compiler:mediatek_compiler_plugin_so
+bazel ${EXTRA_STARTUP} build //litert/vendors/qualcomm/compiler:qnn_compiler_plugin_so
+bazel ${EXTRA_STARTUP} build //litert/vendors/mediatek/compiler:compiler_plugin_so
 
 bazel ${EXTRA_STARTUP} build //litert/runtime:compiled_model

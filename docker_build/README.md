@@ -14,9 +14,9 @@ initialization and project configuration in a single step.
 
 1. Clone this repository
 2. Run the build script:
-   ```
+  ```
    ./build_with_docker.sh
-   ```
+  ```
 
 This will:
 
@@ -42,8 +42,7 @@ Options: - `--use_existing_image` — skip `docker build` and reuse the existing
 image - `--dbg` — build in debug mode instead of optimized - `--python=3.12` —
 set `HERMETIC_PYTHON_VERSION`
 
-To verify the Intel OpenVINO plugin is bundled: `unzip -l dist/*.whl | grep
-openvino`
+To verify the Intel OpenVINO plugin is bundled: `unzip -l dist/*.whl | grep openvino`
 
 ## Building with Docker Compose
 
@@ -66,8 +65,7 @@ forwarding for Bazel's JVM downloader, SVE workaround for Apple Silicon). Use
 `${EXTRA_STARTUP}` in every `bazel` command so proxy and platform flags are
 applied automatically.
 
-Default `run_build.sh`: `bash source /setup_bazel_env.sh bazel ${EXTRA_STARTUP}
-build //litert/runtime:compiled_model`
+Default `run_build.sh`: `bash source /setup_bazel_env.sh bazel ${EXTRA_STARTUP} build //litert/runtime:compiled_model`
 
 #### Example: Intel OpenVINO compiler plugin, dispatch library, and benchmark tool
 
@@ -82,51 +80,71 @@ bazel ${EXTRA_STARTUP} build //litert/tools:benchmark_model
 
 ```bash
 source /setup_bazel_env.sh
-bazel ${EXTRA_STARTUP} build //litert/vendors/qualcomm/compiler:qualcomm_compiler_plugin_so
-bazel ${EXTRA_STARTUP} build //litert/vendors/mediatek/compiler:mediatek_compiler_plugin_so
+bazel ${EXTRA_STARTUP} build //litert/vendors/qualcomm/compiler:qnn_compiler_plugin_so
+bazel ${EXTRA_STARTUP} build //litert/vendors/mediatek/compiler:compiler_plugin_so
 bazel ${EXTRA_STARTUP} build //litert/vendors/intel_openvino/compiler:libLiteRtCompilerPlugin_IntelOpenvino.so
 ```
 
 After editing, rebuild the Docker image to pick up the changes (the file is
-`COPY`'d during `docker build`): `bash ./build_with_docker.sh # rebuilds image +
-runs build ./build_with_docker.sh --use_existing_image # skip image rebuild
-(won't pick up run_build.sh changes)`
+`COPY`'d during `docker build`): `bash ./build_with_docker.sh # rebuilds image + runs build ./build_with_docker.sh --use_existing_image # skip image rebuild (won't pick up run_build.sh changes)`
 
 ### Alternative: Override CMD without editing files
 
 You can also pass a one-off command directly via `docker run`, without modifying
-`run_build.sh`: ```bash
+`run_build.sh`:
 
 # From the repository root:
 
-docker run --rm \
---security-opt seccomp=unconfined \
---user $(id -u):$(id -g) \
--e HOME=/litert_build -e USER=$(id -un) \
--e http_proxy="${http_proxy:-}" \
--e https_proxy="${https_proxy:-}" \
--v $(pwd):/litert_build \
-litert_build_env \
-bash -c 'source /setup_bazel_env.sh && bazel ${EXTRA_STARTUP} build
-//litert/your_custom:target' ```
+```bash
+REPO_ROOT="$(pwd)"
+
+docker run --name litert_custom_build \
+  --security-opt seccomp=unconfined \
+  --user $(id -u):$(id -g) \
+  -e HOME=/litert_build -e USER=$(id -un) \
+  -e http_proxy="${http_proxy:-}" \
+  -e https_proxy="${https_proxy:-}" \
+  -v "${REPO_ROOT}:/litert_build" \
+  litert_build_env \
+  bash -c 'source /setup_bazel_env.sh && bazel ${EXTRA_STARTUP} build //litert/local_compiler:target'
+```
+
+The container is kept after exit (no `--rm`) so you can re-enter it or copy
+artifacts. Remove it when done: `docker rm -f litert_custom_build`.
 
 ## Accessing Build Artifacts
 
-Copy artifacts out of the container:
+Build outputs land under `bazel-bin/` in your mounted checkout, so they are
+available on the host even after the container stops.
+
+Copy artifacts out of the container (if needed):
+
 ```
 docker cp <container>:/litert_build/bazel-bin/<path> .
 ```
-(`litert_build_container` is the name used by `build_with_docker.sh`. Use
-`docker ps -a` to find the name for Docker Compose.)
 
-To browse outputs from inside a container shell, run (from the repo root):
+(`litert_build_container` is the name used by `build_with_docker.sh`. It exits
+when the build finishes; use `docker ps -a` to find the name for Docker Compose.)
+
+For an interactive shell (without re-running the build), start a named debug
+container (reusable across sessions):
+
 ```
-docker run --rm -it --user $(id -u):$(id -g) -e HOME=/litert_build -e USER=$(id -un) -v $(pwd):/litert_build litert_build_env bash
+docker run -it --name litert_shell \
+  --security-opt seccomp=unconfined \
+  --user $(id -u):$(id -g) \
+  -e HOME=/litert_build -e USER=$(id -un) \
+  -v "$(pwd)":/litert_build \
+  litert_build_env bash
 ```
+
+Re-enter later with `docker start -ai litert_shell`. Remove when done:
+`docker rm -f litert_shell`.
 
 ## How It Works
 
 The Docker environment:
+
 1. Sets up a Ubuntu 24.04 build environment (with newer libc/libc++)
 2. Installs Bazel 7.4.1 and necessary build tools
 3. Configures Android SDK and NDK with the correct versions
@@ -147,16 +165,18 @@ export no_proxy="localhost,127.0.0.1,.example.com"
 
 The build scripts automatically forward these variables through three layers:
 
-| Layer        | Mechanism                               | Tools affected     |
-| ------------ | --------------------------------------- | ------------------ |
-| Docker image | `--build-arg` in `docker build`         | `apt-get`, `wget`, |
-: build        :                                         : `pip` during image :
-:              :                                         : creation           :
-| Container    | `-e` in `docker run`                    | `curl`, `pip`,     |
-: runtime      :                                         : general network    :
-:              :                                         : access             :
-| Bazel JVM    | `--host_jvm_args=-Dhttps.proxyHost=...` | Bazel repository   |
-: downloader   :                                         : fetches            :
+
+| Layer                            | Mechanism                               | Tools affected     |
+| -------------------------------- | --------------------------------------- | ------------------ |
+| Docker image                     | `--build-arg` in `docker build`         | `apt-get`, `wget`, |
+| : build : : `pip` during image : |                                         |                    |
+| : : : creation :                 |                                         |                    |
+| Container                        | `-e` in `docker run`                    | `curl`, `pip`,     |
+| : runtime : : general network :  |                                         |                    |
+| : : : access :                   |                                         |                    |
+| Bazel JVM                        | `--host_jvm_args=-Dhttps.proxyHost=...` | Bazel repository   |
+| : downloader : : fetches :       |                                         |                    |
+
 
 Bazel's JVM-based downloader does **not** read `http_proxy`/`https_proxy`
 natively. The scripts parse the proxy URL, extract host and port, and pass them
@@ -174,6 +194,14 @@ If you encounter build errors:
 3. Check the Docker logs for any specific error messages
 
 You can run a shell in the container for debugging (from the repo root):
+
 ```
-docker run --rm -it --user $(id -u):$(id -g) -e HOME=/litert_build -e USER=$(id -un) -v $(pwd):/litert_build litert_build_env bash
+docker run -it --name litert_shell \
+  --security-opt seccomp=unconfined \
+  --user $(id -u):$(id -g) \
+  -e HOME=/litert_build -e USER=$(id -un) \
+  -v "$(pwd)":/litert_build \
+  litert_build_env bash
 ```
+
+Re-enter later with `docker start -ai litert_shell`.
