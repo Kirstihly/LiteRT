@@ -10,7 +10,10 @@ MIN_QNN_SYSTEM_API_MINOR=10
 
 usage() {
   cat <<EOF >&2
-Usage: $(basename "$0") [--log-file PATH] <model.tflite>
+Usage: $(basename "$0") [--cpu] [--log-file PATH] <model.tflite>
+
+Options:
+  --cpu, --accelerator=cpu   Run on CPU only (no NPU dispatch/compiler plugins)
 
 Environment:
   BAZEL_BIN           Path to bazel-bin (default: \${REPO_ROOT}/bazel-bin)
@@ -229,8 +232,17 @@ run_benchmark() {
 }
 
 LOG_FILE=""
+CPU_ONLY=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --cpu)
+      CPU_ONLY=true
+      shift
+      ;;
+    --accelerator=cpu)
+      CPU_ONLY=true
+      shift
+      ;;
     --log-file|--log)
       [[ $# -ge 2 ]] || usage
       LOG_FILE="$2"
@@ -267,20 +279,67 @@ MODEL_STEM="${MODEL_NAME%.tflite}"
 
 SOC_MODEL=$(adb shell getprop ro.soc.model | tr -d '\r')
 
-# Detect NPU vendor from ro.soc.model (Qualcomm: SM/SW/QCS/...; MediaTek: MT...)
-case "${SOC_MODEL}" in
-  MT*) NPU_VENDOR=mediatek ;;
-  SM*) NPU_VENDOR=qualcomm;;
-  *)
-    echo "Device detected: ${SOC_MODEL}. Unknown SoC (expected Qualcomm or MediaTek)."
-    exit 1
-    ;;
-esac
+if [[ "${CPU_ONLY}" == "true" ]]; then
+  NPU_VENDOR=cpu
+else
+  # Detect NPU vendor from ro.soc.model (Qualcomm: SM/SW/QCS/...; MediaTek: MT...)
+  case "${SOC_MODEL}" in
+    MT*) NPU_VENDOR=mediatek ;;
+    SM*) NPU_VENDOR=qualcomm;;
+    *)
+      echo "Device detected: ${SOC_MODEL}. Unknown SoC (expected Qualcomm or MediaTek)."
+      exit 1
+      ;;
+  esac
+fi
 
 LOG_FILE="${LOG_FILE:-${SCRIPT_DIR}/ondevice_test_${NPU_VENDOR}_${MODEL_STEM}_$(date +%Y%m%d_%H%M%S).log}"
 
 echo "Device detected: ${SOC_MODEL} (${NPU_VENDOR})"
 echo "Using bazel-bin: ${BAZEL_BIN}"
+
+if [[ "${CPU_ONLY}" == "true" ]]; then
+  TEST_FOLDER=/data/local/tmp/litert_prof
+  ANDROID_BUILD_FLAGS=(
+    -c opt --cxxopt=--std=c++17 --nocheck_visibility --config=android_arm64
+    --copt=-DABSL_FLAGS_STRIP_NAMES=0
+  )
+  ANDROID_BUILD_HINT=$(
+    cat <<EOF
+Build Android on-device artifacts from the repo root, then re-run:
+  cd ${REPO_ROOT}
+  bazel build ${ANDROID_BUILD_FLAGS[*]} //litert/tools:benchmark_model
+  bazel build ${ANDROID_BUILD_FLAGS[*]} //litert/c:libLiteRt.so
+
+Inside Docker, source the Bazel env first:
+  source /setup_bazel_env.sh
+  bazel \${EXTRA_STARTUP} build ${ANDROID_BUILD_FLAGS[*]} //litert/tools:benchmark_model
+  bazel \${EXTRA_STARTUP} build ${ANDROID_BUILD_FLAGS[*]} //litert/c:libLiteRt.so
+EOF
+  )
+
+  BENCHMARK_MODEL="$(require_file "litert/tools/benchmark_model" "${ANDROID_BUILD_HINT}")"
+  LIB_LITERT="$(require_file "litert/c/libLiteRt.so" "${ANDROID_BUILD_HINT}")"
+  DISPATCH_SO=""
+  COMPILER_PLUGIN_SO=""
+
+  adb shell mkdir -p "${TEST_FOLDER}"
+  adb push "${BENCHMARK_MODEL}" "${TEST_FOLDER}/"
+  adb push "${LIB_LITERT}" "${TEST_FOLDER}/"
+  adb push "${MODEL_PATH}" "${TEST_FOLDER}/${MODEL_NAME}"
+
+  BENCHMARK_COMMON_FLAGS="\
+  --graph=${MODEL_NAME} \
+  --use_npu=false \
+  --use_cpu=true \
+  --use_profiler=true \
+  --num_runs=10 --warmup_runs=1"
+
+  ADB_BENCHMARK_CMD="export LD_LIBRARY_PATH=${TEST_FOLDER} && \
+cd ${TEST_FOLDER} && ./benchmark_model ${BENCHMARK_COMMON_FLAGS}"
+  run_benchmark "${ADB_BENCHMARK_CMD}"
+  exit $?
+fi
 
 if [ "${NPU_VENDOR}" = "qualcomm" ]; then
   if [ "$SOC_MODEL" == "SM8850" ]; then
