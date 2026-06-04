@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RUN_MODEL="/litert_build/bazel-bin/litert/tools/run_model"
-ONNX_ROOT="/litert_build/onnx_files"
-BAZEL_BIN="/litert_build/bazel-bin"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ONNX_ROOT="${ONNX_ROOT:-${SCRIPT_DIR}}"
+BAZEL_BIN="${BAZEL_BIN:-${REPO_ROOT}/bazel-bin}"
+RUN_MODEL=""
 ITERATIONS=100
 ACCELERATOR="cpu"
 DISPATCH_LIBRARY_DIR=""
@@ -19,6 +21,22 @@ MEDIATEK_MEDIUM_PERFORMANCE_MODE="sustained_speed"
 
 QUALCOMM_DISPATCH_SO="libLiteRtDispatch_Qualcomm.so"
 MEDIATEK_DISPATCH_SO="libLiteRtDispatch_MediaTek.so"
+
+resolve_bazel_artifact() {
+  local rel_path="$1"
+  local candidate
+
+  for candidate in \
+    "${BAZEL_BIN}/${rel_path}" \
+    "${REPO_ROOT}/bazel-bin/${rel_path}" \
+    "${REPO_ROOT}/.cache/bazel"/*/*/execroot/litert/bazel-out/*/bin/${rel_path}; do
+    if [[ -f "${candidate}" ]]; then
+      echo "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
 
 resolve_dispatch_dir() {
   local vendor="$1"
@@ -37,15 +55,11 @@ resolve_dispatch_dir() {
       ;;
   esac
 
-  local candidate
-  for candidate in \
-    "${BAZEL_BIN}/${rel_dir}/${so_name}" \
-    "/litert_build/.cache/bazel"/*"/execroot/litert/bazel-out"/*/bin/${rel_dir}/${so_name}; do
-    if [[ -f "${candidate}" ]]; then
-      dirname "${candidate}"
-      return 0
-    fi
-  done
+  local resolved
+  if resolved="$(resolve_bazel_artifact "${rel_dir}/${so_name}")"; then
+    dirname "${resolved}"
+    return 0
+  fi
   return 1
 }
 
@@ -61,14 +75,18 @@ build_dispatch_library() {
   local target
   target="$(dispatch_bazel_target "${vendor}")"
 
-  if [[ ! -f /setup_bazel_env.sh ]]; then
+  local setup_script="${REPO_ROOT}/docker_build/setup_bazel_env.sh"
+  if [[ ! -f "${setup_script}" && -f /setup_bazel_env.sh ]]; then
+    setup_script="/setup_bazel_env.sh"
+  fi
+  if [[ ! -f "${setup_script}" ]]; then
     return 1
   fi
 
   echo "Building ${vendor} dispatch library (${target})..." >&2
   # shellcheck disable=SC1091
-  source /setup_bazel_env.sh
-  bazel ${EXTRA_STARTUP} build "${target}"
+  source "${setup_script}"
+  bazel ${EXTRA_STARTUP:-} build "${target}"
 }
 
 ensure_dispatch_library() {
@@ -93,7 +111,39 @@ apply_npu_performance_modes() {
     mediatek)
       MEDIATEK_PERFORMANCE_MODE="${MEDIATEK_PERFORMANCE_MODE:-${MEDIATEK_MEDIUM_PERFORMANCE_MODE}}"
       ;;
+    *)
+      if [[ "${ACCELERATOR}" == *npu* && -n "${DISPATCH_LIBRARY_DIR}" ]]; then
+        if [[ -f "${DISPATCH_LIBRARY_DIR}/${QUALCOMM_DISPATCH_SO}" ]]; then
+          QUALCOMM_HTP_PERFORMANCE_MODE="${QUALCOMM_HTP_PERFORMANCE_MODE:-${QUALCOMM_MEDIUM_PERFORMANCE_MODE}}"
+          QUALCOMM_DSP_PERFORMANCE_MODE="${QUALCOMM_DSP_PERFORMANCE_MODE:-${QUALCOMM_MEDIUM_PERFORMANCE_MODE}}"
+        elif [[ -f "${DISPATCH_LIBRARY_DIR}/${MEDIATEK_DISPATCH_SO}" ]]; then
+          MEDIATEK_PERFORMANCE_MODE="${MEDIATEK_PERFORMANCE_MODE:-${MEDIATEK_MEDIUM_PERFORMANCE_MODE}}"
+        fi
+      fi
+      ;;
   esac
+}
+
+performance_mode_label() {
+  if [[ "${ACCELERATOR}" != *npu* ]]; then
+    echo "n/a"
+    return
+  fi
+  if [[ -n "${MEDIATEK_PERFORMANCE_MODE}" ]]; then
+    echo "${MEDIATEK_PERFORMANCE_MODE}"
+    return
+  fi
+  if [[ -n "${QUALCOMM_HTP_PERFORMANCE_MODE}" || -n "${QUALCOMM_DSP_PERFORMANCE_MODE}" ]]; then
+    local htp="${QUALCOMM_HTP_PERFORMANCE_MODE:-default}"
+    local dsp="${QUALCOMM_DSP_PERFORMANCE_MODE:-default}"
+    if [[ "${htp}" == "${dsp}" ]]; then
+      echo "${htp}"
+    else
+      echo "htp=${htp},dsp=${dsp}"
+    fi
+    return
+  fi
+  echo "default"
 }
 
 dispatch_build_hint() {
@@ -226,6 +276,9 @@ if [[ -n "${NPU_VENDOR}" ]]; then
       exit 1
     fi
   fi
+fi
+
+if [[ "${ACCELERATOR}" == *npu* ]]; then
   apply_npu_performance_modes
 fi
 
@@ -259,6 +312,10 @@ RUN_LABEL="${ACCELERATOR}"
 if [[ -n "${NPU_VENDOR}" ]]; then
   RUN_LABEL="${ACCELERATOR}_${NPU_VENDOR}"
 fi
+PERFORMANCE_MODE_LABEL="$(performance_mode_label)"
+if [[ "${PERFORMANCE_MODE_LABEL}" != "n/a" ]]; then
+  RUN_LABEL="${RUN_LABEL}_${PERFORMANCE_MODE_LABEL//[^[:alnum:]_]/_}"
+fi
 RESULTS_FILE="${ONNX_ROOT}/batch_test_results_${RUN_LABEL}_$(date +%Y%m%d_%H%M%S).txt"
 
 MODELS=(
@@ -281,8 +338,20 @@ MODELS=(
   deltaforce_yolo_noe2e
 )
 
+if ! RUN_MODEL="$(resolve_bazel_artifact "litert/tools/run_model")"; then
+  cat >&2 <<EOF
+Error: run_model not found under ${BAZEL_BIN}
+
+Build it with:
+  source ${REPO_ROOT}/docker_build/setup_bazel_env.sh
+  bazel build //litert/tools:run_model
+
+Or set BAZEL_BIN to your bazel-bin directory.
+EOF
+  exit 1
+fi
 if [[ ! -x "${RUN_MODEL}" ]]; then
-  echo "Error: run_model not found at ${RUN_MODEL}" >&2
+  echo "Error: run_model is not executable: ${RUN_MODEL}" >&2
   exit 1
 fi
 
@@ -323,6 +392,7 @@ format_run_model_command() {
 {
   echo "accelerator=${ACCELERATOR}"
   echo "iterations=${ITERATIONS}"
+  echo "performance_mode=${PERFORMANCE_MODE_LABEL}"
   if [[ -n "${NPU_VENDOR}" ]]; then
     echo "npu_vendor=${NPU_VENDOR}"
   fi
