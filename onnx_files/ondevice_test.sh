@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+NUM_RUNS="${NUM_RUNS:-500}"
+WARMUP_RUNS="${WARMUP_RUNS:-1}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BAZEL_BIN="${BAZEL_BIN:-${REPO_ROOT}/bazel-bin}"
@@ -10,10 +13,12 @@ MIN_QNN_SYSTEM_API_MINOR=10
 
 usage() {
   cat <<EOF >&2
-Usage: $(basename "$0") [--cpu] [--log-file PATH] <model.tflite>
+Usage: $(basename "$0") [--cpu] [--iterations=N] [--log-file PATH] <model.tflite>
 
 Options:
   --cpu, --accelerator=cpu   Run on CPU only (no NPU dispatch/compiler plugins)
+  --iterations=N, --num-runs=N
+                      Inference runs for benchmark_model (default: ${NUM_RUNS})
 
 Environment:
   BAZEL_BIN           Path to bazel-bin (default: \${REPO_ROOT}/bazel-bin)
@@ -27,6 +32,13 @@ Environment:
   LITERT_REQUIRE_FULL_DELEGATION
                       Fail if any op stays on CPU (default: false; YOLO-style
                       models often delegate only part of the graph)
+  QUALCOMM_HTP_PERFORMANCE_MODE
+  QUALCOMM_DSP_PERFORMANCE_MODE
+                      Qualcomm NPU modes (default: balanced for both)
+  MEDIATEK_PERFORMANCE_MODE
+                      MediaTek NPU mode (default: sustained_speed)
+  NUM_RUNS            Inference runs (default: 500; alias for --iterations)
+  WARMUP_RUNS         Warmup runs (default: 1)
 EOF
   exit 1
 }
@@ -207,10 +219,14 @@ write_log_header() {
       echo "qcom_htp_version=${QCOM_HTP_VERSION:-}"
       echo "dsp_arch=${DSP_ARCH:-}"
       echo "qairt_root=${QAIRT_ROOT:-}"
+      echo "qualcomm_htp_performance_mode=${QUALCOMM_HTP_PERFORMANCE_MODE}"
+      echo "qualcomm_dsp_performance_mode=${QUALCOMM_DSP_PERFORMANCE_MODE}"
     elif [[ "${NPU_VENDOR}" == "mediatek" ]]; then
       echo "mediatek_performance_mode=${MEDIATEK_PERFORMANCE_MODE}"
       echo "mediatek_nerun_pilot_version=${MEDIATEK_NERUN_PILOT_VERSION:-}"
     fi
+    echo "num_runs=${NUM_RUNS}"
+    echo "warmup_runs=${WARMUP_RUNS}"
     echo "benchmark_command=${benchmark_cmd}"
     echo ""
   } > "${LOG_FILE}"
@@ -246,6 +262,15 @@ while [[ $# -gt 0 ]]; do
     --log-file|--log)
       [[ $# -ge 2 ]] || usage
       LOG_FILE="$2"
+      shift 2
+      ;;
+    --iterations=*|--num-runs=*)
+      NUM_RUNS="${1#*=}"
+      shift
+      ;;
+    --iterations|--num-runs)
+      [[ $# -ge 2 ]] || usage
+      NUM_RUNS="$2"
       shift 2
       ;;
     -h|--help)
@@ -333,7 +358,7 @@ EOF
   --use_npu=false \
   --use_cpu=true \
   --use_profiler=true \
-  --num_runs=10 --warmup_runs=1"
+  --num_runs=${NUM_RUNS} --warmup_runs=${WARMUP_RUNS}"
 
   ADB_BENCHMARK_CMD="export LD_LIBRARY_PATH=${TEST_FOLDER} && \
 cd ${TEST_FOLDER} && ./benchmark_model ${BENCHMARK_COMMON_FLAGS}"
@@ -382,8 +407,10 @@ if [ "${NPU_VENDOR}" = "qualcomm" ]; then
     QCOM_HTP_VERSION="${QCOM_HTP_VERSION:-81}"
     DSP_ARCH=v${QCOM_HTP_VERSION}
   fi
+  QUALCOMM_HTP_PERFORMANCE_MODE="${QUALCOMM_HTP_PERFORMANCE_MODE:-balanced}"
+  QUALCOMM_DSP_PERFORMANCE_MODE="${QUALCOMM_DSP_PERFORMANCE_MODE:-balanced}"
 elif [ "${NPU_VENDOR}" = "mediatek" ]; then
-  MEDIATEK_PERFORMANCE_MODE=sustained_speed
+  MEDIATEK_PERFORMANCE_MODE="${MEDIATEK_PERFORMANCE_MODE:-sustained_speed}"
   # MT6993 requires NeuroPilot v9; other MT* SoCs use the default (v8).
   case "${SOC_MODEL}" in
     MT6993) MEDIATEK_NERUN_PILOT_VERSION=version9 ;;
@@ -455,18 +482,21 @@ BENCHMARK_COMMON_FLAGS="\
   --compiler_plugin_library_path=${TEST_FOLDER} \
   --compiler_cache_path=${TEST_FOLDER} \
   --use_profiler=true \
-  --num_runs=10 --warmup_runs=1"
+  --num_runs=${NUM_RUNS} --warmup_runs=${WARMUP_RUNS}"
 
 if [ "${NPU_VENDOR}" = "qualcomm" ]; then
   push_qairt_libs
+  QUALCOMM_EXTRA_ARGS="\
+--qualcomm_htp_performance_mode=${QUALCOMM_HTP_PERFORMANCE_MODE} \
+--qualcomm_dsp_performance_mode=${QUALCOMM_DSP_PERFORMANCE_MODE}"
   ADB_BENCHMARK_CMD="export LD_LIBRARY_PATH=${TEST_FOLDER} && export ADSP_LIBRARY_PATH=${TEST_FOLDER} && \
-cd ${TEST_FOLDER} && ./benchmark_model ${BENCHMARK_COMMON_FLAGS}"
+cd ${TEST_FOLDER} && ./benchmark_model ${BENCHMARK_COMMON_FLAGS} ${QUALCOMM_EXTRA_ARGS}"
   run_benchmark "${ADB_BENCHMARK_CMD}"
   exit $?
 elif [ "${NPU_VENDOR}" = "mediatek" ]; then
-  MEDIATEK_EXTRA_ARGS=""
+  MEDIATEK_EXTRA_ARGS="--mediatek_performance_mode_type=${MEDIATEK_PERFORMANCE_MODE}"
   if [ -n "${MEDIATEK_NERUN_PILOT_VERSION:-}" ]; then
-    MEDIATEK_EXTRA_ARGS="--mediatek_nerun_pilot_version=${MEDIATEK_NERUN_PILOT_VERSION}"
+    MEDIATEK_EXTRA_ARGS="${MEDIATEK_EXTRA_ARGS} --mediatek_nerun_pilot_version=${MEDIATEK_NERUN_PILOT_VERSION}"
   fi
 
   ADB_BENCHMARK_CMD="export LD_LIBRARY_PATH=${TEST_FOLDER} && \

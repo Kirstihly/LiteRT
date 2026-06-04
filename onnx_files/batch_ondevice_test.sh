@@ -5,7 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ONNX_ROOT="${ONNX_ROOT:-${SCRIPT_DIR}}"
 ONDEVICE_TEST="${SCRIPT_DIR}/ondevice_test.sh"
 CPU_ONLY=false
-EXTRA_ONDEVICE_ARGS=()
+ITERATIONS="${ITERATIONS:-500}"
+EXTRA_ONDEVICE_ARGS=(--iterations="${ITERATIONS}")
 
 usage() {
   cat <<EOF
@@ -14,8 +15,13 @@ Usage: $(basename "$0") [OPTIONS]
 Run ondevice_test.sh for all models and record a summary table with device
 info, inference timings, and node-type computation breakdown.
 
+NPU performance modes (via ondevice_test.sh):
+  Qualcomm:  balanced (HTP and DSP)
+  MediaTek:  sustained_speed
+
 Options:
   --cpu                         Run on CPU only (passed to ondevice_test.sh)
+  --iterations=N                Inference runs per model (default: 500)
   -h, --help                    Show this help
 
 Each model log is written under:
@@ -35,6 +41,13 @@ while [[ $# -gt 0 ]]; do
     --cpu)
       CPU_ONLY=true
       EXTRA_ONDEVICE_ARGS+=(--cpu)
+      ;;
+    --iterations=*)
+      ITERATIONS="${1#*=}"
+      EXTRA_ONDEVICE_ARGS=(--iterations="${ITERATIONS}")
+      if [[ "${CPU_ONLY}" == "true" ]]; then
+        EXTRA_ONDEVICE_ARGS+=(--cpu)
+      fi
       ;;
     -h|--help)
       usage
@@ -80,7 +93,11 @@ else
       exit 1
       ;;
   esac
-  RUN_LABEL="ondevice_${NPU_VENDOR}_${SOC_MODEL}"
+  case "${NPU_VENDOR}" in
+    qualcomm) PERFORMANCE_MODE=balanced ;;
+    mediatek) PERFORMANCE_MODE=sustained_speed ;;
+  esac
+  RUN_LABEL="ondevice_${NPU_VENDOR}_${SOC_MODEL}_${PERFORMANCE_MODE}"
 fi
 
 RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
@@ -159,6 +176,10 @@ write_results_header() {
     echo "timestamp=$(date -Iseconds)"
     echo "device=${SOC_MODEL}"
     echo "npu_vendor=${NPU_VENDOR}"
+    if [[ -n "${PERFORMANCE_MODE:-}" ]]; then
+      echo "performance_mode=${PERFORMANCE_MODE}"
+    fi
+    echo "iterations=${ITERATIONS}"
     echo "log_dir=${LOG_DIR}"
     echo "ondevice_test=${ONDEVICE_TEST}"
     if ((${#EXTRA_ONDEVICE_ARGS[@]} > 0)); then
