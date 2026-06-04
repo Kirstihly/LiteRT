@@ -20,6 +20,10 @@ Environment:
   QAIRT               Alias for QAIRT SDK root (Qualcomm only)
                       Auto-selects newest QAIRT >= 2.46 (QNN System API 1.10+)
                       from ${QAIRT_SEARCH_ROOT} or the Bazel-downloaded SDK
+  LITERT_USE_CPU      Enable CPU for non-delegated ops (default: true)
+  LITERT_REQUIRE_FULL_DELEGATION
+                      Fail if any op stays on CPU (default: false; YOLO-style
+                      models often delegate only part of the graph)
 EOF
   exit 1
 }
@@ -380,11 +384,14 @@ adb push "${DISPATCH_SO}" "${TEST_FOLDER}/"
 adb push "${COMPILER_PLUGIN_SO}" "${TEST_FOLDER}/"
 adb push "${MODEL_PATH}" "${TEST_FOLDER}/${MODEL_NAME}"
 
+LITERT_USE_CPU="${LITERT_USE_CPU:-true}"
+LITERT_REQUIRE_FULL_DELEGATION="${LITERT_REQUIRE_FULL_DELEGATION:-false}"
+
 BENCHMARK_COMMON_FLAGS="\
   --graph=${MODEL_NAME} \
   --use_npu=true \
-  --use_cpu=false \
-  --require_full_delegation=true \
+  --use_cpu=${LITERT_USE_CPU} \
+  --require_full_delegation=${LITERT_REQUIRE_FULL_DELEGATION} \
   --dispatch_library_path=${TEST_FOLDER} \
   --compiler_plugin_library_path=${TEST_FOLDER} \
   --compiler_cache_path=${TEST_FOLDER} \
